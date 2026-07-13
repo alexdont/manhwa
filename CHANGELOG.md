@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 (2026-07-13)
+
+* Fix: the strip page assumed the host's user struct has a `.uuid`
+  field (rendered into a dead `data-user-uuid` attribute), crashing
+  the render for hosts with differently-shaped users. The Store
+  contract treats the user as opaque — now the templates do too.
+
 ## 0.1.0 (2026-07-13)
 
 Initial extraction from the Greenoak reader:
