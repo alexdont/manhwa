@@ -8,10 +8,11 @@ defmodule Manhwa do
   [`fresco_strip`](https://hex.pm/packages/fresco_strip), chapter
   navigation with infinite next-chapter loading, progress persistence,
   per-series settings, an image proxy, and an optional annotation
-  layer via [`etcher`](https://hex.pm/packages/etcher). It is also the
-  shared core of the [`manga`](https://hex.pm/packages/manga) paged
-  reader — install that instead if you want both reading modes with a
-  per-series switch.
+  layer via [`etcher`](https://hex.pm/packages/etcher).
+
+  Reading paged comics? See the sibling package
+  [`manga`](https://hex.pm/packages/manga) — a page/spread reader for
+  the other reading mode, built on the same core.
 
   ## Wiring
 

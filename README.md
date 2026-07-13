@@ -12,9 +12,9 @@ progress persistence (page + fraction + reading time), a same-origin image
 proxy with per-source headers, and an optional annotation layer via
 [etcher](https://hex.pm/packages/etcher).
 
-`manhwa` is also the shared core of the
-[`manga`](https://hex.pm/packages/manga) paged reader — install that instead
-if you want both reading modes with a per-series mode switch.
+**Reading paged comics?** That's the sibling package —
+[`manga`](https://hex.pm/packages/manga) — a page/spread reader built on
+fresco's pan-zoom canvas (RTL/LTR, double-page spreads, page overrides).
 
 ---
 
