@@ -2,7 +2,7 @@ defmodule Manhwa.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @description "Batteries-included long-strip comic reader for Phoenix — webtoons, manhwa, manhua, anything that reads by scrolling. Mounts its own routes via a router macro, persists through a small Store behaviour, and ships the full reader UI (snap engine, auto-reader, progress, settings) on top of fresco_strip. Also the shared core for the `manga` paged reader."
+  @description "Batteries-included long-strip comic reader for Phoenix — webtoons, manhwa, manhua, anything that reads by scrolling. Router-mounted reader with panel snap, auto-reader, progress, and settings on top of fresco_strip; persistence via a small Store behaviour."
   @source_url "https://github.com/alexdont/manhwa"
 
   def project do
@@ -41,7 +41,7 @@ defmodule Manhwa.MixProject do
       maintainers: ["Alexander Don"],
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib priv mix.exs README.md LICENSE CHANGELOG.md)
+      files: ~w(lib mix.exs README.md LICENSE CHANGELOG.md)
     ]
   end
 

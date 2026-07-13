@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-07-13)
 
 Initial extraction from the Greenoak reader:
 
