@@ -1862,12 +1862,12 @@
         if (srcH <= 0) return null;
         return el.offsetTop + (srcY * el.offsetHeight / srcH) - gutterDetectOffset();
       }
-      // Snap offset from the top — 10% of viewport height. Snap
-      // targets land `offset` px below the top edge so the user sees
-      // a strip of the previous panel for context instead of the next
-      // panel flush against the top.
+      // Snap offset from the top — 5.5% of viewport height, matching
+      // the legacy reader exactly. Snap targets land `offset` px below
+      // the top edge so the user sees a sliver of the previous gutter
+      // for context instead of the panel flush against the top.
       function gutterDetectOffset() {
-        return Math.round(container.clientHeight * 0.10);
+        return Math.round(container.clientHeight * 0.055);
       }
       function isWhiteAtScroll(scrollPx) {
         scrollPx = scrollPx + gutterDetectOffset();
