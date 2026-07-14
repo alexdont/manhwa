@@ -3932,6 +3932,25 @@
           console.warn("[mouse-gesture] requestPointerLock threw", err);
         }
       });
+
+      // Middle-click (scroll-wheel button) toggles gesture mode — the
+      // same gesture the OS uses for auto-scroll, which this mode
+      // emulates. Interactive elements keep their native middle-click
+      // behavior (links: open in new tab); elsewhere we suppress the
+      // browser's autoscroll and enter the mode. Exit is explicit here
+      // because a middle press fires `auxclick`, not `click`, so the
+      // any-click exit handler never sees it.
+      document.addEventListener("mousedown", (e) => {
+        if (e.button !== 1) return;
+        if (document.pointerLockElement) {
+          e.preventDefault();
+          document.exitPointerLock();
+          return;
+        }
+        if (e.target.closest("a, button, input, textarea, select, dialog")) return;
+        e.preventDefault();
+        btn.click();
+      });
     })();
   })();
 </script>

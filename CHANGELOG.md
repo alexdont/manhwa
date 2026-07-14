@@ -5,6 +5,9 @@
 * The mouse-gesture button (bottom-right) now shows a 4-directional
   move icon instead of a down arrow, matching the OS auto-scroll
   affordance it provides.
+* Middle-click (scroll-wheel button) anywhere in the reader now
+  toggles mouse-gesture mode — the same gesture as OS auto-scroll.
+  Middle-clicks on links/controls keep their native behavior.
 * Fix: the nav's prev/next chapter arrows now retarget to the dominant
   chapter's neighbours as the strip auto-appends chapters — they were
   server-rendered against the landing chapter and went stale (the
