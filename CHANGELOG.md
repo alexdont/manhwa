@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3 (unreleased)
+## 0.1.3 (2026-07-14)
 
 * Panel snap rebuilt to legacy fidelity: gutter detection now analyzes
   every source row at native resolution (legacy-style sparse column
@@ -12,11 +12,28 @@
   skipped as noise) with band merging, and snaps now await detection
   for the whole scan range instead of silently degrading to a raw
   viewport jump on a cold cache.
+* Gutters must match the page background, not just be flat: each image
+  estimates its background from band colors (one vote per band, so
+  recurring gutters out-vote any single flat art region), with
+  near-white flat bands always accepted. Blurred/uniform panel
+  openings no longer classify as gutters, and black-page flashback
+  chapters keep their dark gutters.
 * Predictive snap queue: the next 7 forward snap targets are
   precomputed from the resting position (and rebuilt on scroll/settle/
   config change), stored as layout-shift-proof anchors — a tap
   consumes a ready target with zero scan latency, and the build
-  doubles as image prewarm for the panels ahead.
+  doubles as image prewarm for the panels ahead. The queue flushes
+  synchronously on any manual scroll so stale chains can never skip
+  targets.
+* Free scrolling breaks snap alignment: the first tap afterwards goes
+  straight to the nearest panel start (no long-panel half-step from an
+  arbitrary position); alignment restores on any completed landing.
+* Resume restore now re-anchors the saved fraction at the viewport
+  center — matching how progress saves measure it — instead of the
+  top, which had every "continue" landing half a viewport below where
+  the user stopped.
+* Snap probe offset returned to the legacy 5.5% of viewport height
+  (was 10%).
 
 ## 0.1.2 (2026-07-14)
 
