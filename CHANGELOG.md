@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5 (2026-07-14)
+
+* Docs: the Store's page-dimensions contract now points implementors
+  at the [`dims`](https://hex.pm/packages/dims) package (README wiring
+  example + `fetch_pages` callback docs) — probe URLs' width × height
+  cheaply instead of writing your own prober.
+
 ## 0.1.4 (2026-07-14)
 
 * Half-stepping now keys on the exact condition — the current panel
