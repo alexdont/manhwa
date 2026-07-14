@@ -894,43 +894,54 @@
           rowVar[y]  = variance;
         }
       }
-      // Pass 2: estimate the page background as the median brightness
-      // of the flat rows, then classify gutters as flat AND background-
-      // colored. White-page chapters get bg ≈ 250 (dark flat panel
-      // rows stop counting as gutter — the fix above); black-page
-      // flashback chapters get a dark bg per image, so their black
-      // gutters keep working. Mixed backgrounds within one image
-      // resolve to the dominant one — the rare minority-color gutter
-      // degrades to a plain scroll step rather than a bad landing.
+      // Pass 2: build candidate bands from flatness alone, then filter
+      // by COLOR so flat regions inside artwork (blurred dark panel
+      // openings, uniform shadow areas) stop counting as gutters.
+      //
+      // The page background is estimated from the BAND colors, one
+      // vote per band — never per row. True gutters recur many times
+      // per image, while a dark in-panel blur is one tall band, so it
+      // can't outvote them (a per-row median could flip dark on
+      // dark-heavy pages, silently disqualifying every real gutter —
+      // the reader then "finds nothing" and degrades to bare steps).
+      // Near-white flat bands are additionally accepted regardless of
+      // the estimate: a white flat band on a comic page is essentially
+      // always a real break, and white is the overwhelming default
+      // page background. Black-page flashback chapters still work:
+      // their bands are mostly dark, the estimate follows them.
       const BG_MATCH = 48;
-      const flatMeans = [];
+      const WHITE_FLOOR = 215;
       for (let y = 0; y < h; y++) {
-        if (rowVar[y] <= tolerance) flatMeans.push(rowMean[y]);
-      }
-      flatMeans.sort((a, b) => a - b);
-      const bg = flatMeans.length ? flatMeans[flatMeans.length >> 1] : 255;
-      for (let y = 0; y < h; y++) {
-        isWhite[y] =
-          rowVar[y] <= tolerance && Math.abs(rowMean[y] - bg) <= BG_MATCH ? 1 : 0;
+        isWhite[y] = rowVar[y] <= tolerance ? 1 : 0;
       }
       // min_gutter_width is in source pixels (matches production).
       const minBandRows = Math.max(2, snapConfig.min_gutter_width);
       const margin      = Math.floor(h * MARGIN_PCT);
-      const bands = [];
+      const candidates = [];
       let bandStart = -1;
+      const pushBand = (from, to) => {
+        let sum = 0;
+        for (let y = from; y < to; y++) sum += rowMean[y];
+        candidates.push({ band: [from, to], mean: sum / Math.max(1, to - from) });
+      };
       for (let y = margin; y < h - margin; y++) {
         if (isWhite[y]) {
           if (bandStart === -1) bandStart = y;
         } else {
           if (bandStart !== -1 && (y - bandStart) >= minBandRows) {
-            bands.push([bandStart, y]);
+            pushBand(bandStart, y);
           }
           bandStart = -1;
         }
       }
       if (bandStart !== -1 && ((h - margin) - bandStart) >= minBandRows) {
-        bands.push([bandStart, h - margin]);
+        pushBand(bandStart, h - margin);
       }
+      const bandMeans = candidates.map((c) => c.mean).sort((a, b) => a - b);
+      const bg = bandMeans.length ? bandMeans[bandMeans.length >> 1] : 255;
+      const bands = candidates
+        .filter((c) => c.mean >= WHITE_FLOOR || Math.abs(c.mean - bg) <= BG_MATCH)
+        .map((c) => c.band);
       const merged = mergeCloseBands(
         bands, snapConfig.gutter_merge_gap || 0, rowMean, rowVar, tolerance
       );
@@ -1900,10 +1911,10 @@
           const margin = Math.floor(cached.h * MARGIN_PCT);
           const iy = Math.max(0, Math.min(cached.h - 1, Math.round(srcY)));
           if (iy < margin || iy >= cached.h - margin) {
+            const m = cached.rowMean[iy];
             return (
               cached.rowVar[iy] <= snapConfig.gutter_tolerance &&
-              (cached.bg === undefined ||
-                Math.abs(cached.rowMean[iy] - cached.bg) <= 48)
+              (m >= 215 || cached.bg === undefined || Math.abs(m - cached.bg) <= 48)
             );
           }
         }
@@ -2048,7 +2059,7 @@
         if (!s) return false;
         const tol = (snapConfig.gutter_tolerance || 300) * 5;
         if (s.variance > tol) return false;
-        return s.bg === undefined || Math.abs(s.mean - s.bg) <= 64;
+        return s.mean >= 200 || s.bg === undefined || Math.abs(s.mean - s.bg) <= 64;
       }
 
       // ── Snap target finder (legacy algorithm — see show.html.heex
