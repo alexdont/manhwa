@@ -2,6 +2,9 @@
 
 ## 0.1.2 (2026-07-14)
 
+* The mouse-gesture button (bottom-right) now shows a 4-directional
+  move icon instead of a down arrow, matching the OS auto-scroll
+  affordance it provides.
 * Fix: the nav's prev/next chapter arrows now retarget to the dominant
   chapter's neighbours as the strip auto-appends chapters — they were
   server-rendered against the landing chapter and went stale (the
