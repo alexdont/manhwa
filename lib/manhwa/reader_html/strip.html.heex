@@ -862,9 +862,13 @@
       const rowVar  = new Float32Array(h);
       const tolerance = snapConfig.gutter_tolerance;
       const colStride = 16; // every 4th RGBA pixel — matches legacy
-      // Gutter detection is variance-only (matches legacy isWhiteBand):
-      // any low-variance row counts — pure white, pure black, solid
-      // color, or a cinematic transition band.
+      // Pass 1: per-row mean/variance. Flatness alone is NOT enough to
+      // call a row a gutter — a soft blurred panel opening (uniform
+      // dark scene, defocused establishing shot) is just as flat as
+      // real page background, and variance-only detection extended
+      // bands INTO such panels, making snaps land visibly inside the
+      // art instead of at its edge. Gutter classification therefore
+      // happens in pass 2 against the image's estimated background.
       for (let sy = 0; sy < h; sy += SLICE) {
         const sh = Math.min(SLICE, h - sy);
         let rgba;
@@ -886,10 +890,28 @@
           const mean = sum / n;
           const variance = sumSq / n - mean * mean;
           const y = sy + dy;
-          isWhite[y] = variance <= tolerance ? 1 : 0;
           rowMean[y] = mean;
           rowVar[y]  = variance;
         }
+      }
+      // Pass 2: estimate the page background as the median brightness
+      // of the flat rows, then classify gutters as flat AND background-
+      // colored. White-page chapters get bg ≈ 250 (dark flat panel
+      // rows stop counting as gutter — the fix above); black-page
+      // flashback chapters get a dark bg per image, so their black
+      // gutters keep working. Mixed backgrounds within one image
+      // resolve to the dominant one — the rare minority-color gutter
+      // degrades to a plain scroll step rather than a bad landing.
+      const BG_MATCH = 48;
+      const flatMeans = [];
+      for (let y = 0; y < h; y++) {
+        if (rowVar[y] <= tolerance) flatMeans.push(rowMean[y]);
+      }
+      flatMeans.sort((a, b) => a - b);
+      const bg = flatMeans.length ? flatMeans[flatMeans.length >> 1] : 255;
+      for (let y = 0; y < h; y++) {
+        isWhite[y] =
+          rowVar[y] <= tolerance && Math.abs(rowMean[y] - bg) <= BG_MATCH ? 1 : 0;
       }
       // min_gutter_width is in source pixels (matches production).
       const minBandRows = Math.max(2, snapConfig.min_gutter_width);
@@ -912,7 +934,7 @@
       const merged = mergeCloseBands(
         bands, snapConfig.gutter_merge_gap || 0, rowMean, rowVar, tolerance
       );
-      return { bands: merged, rawBands: bands, rowMean, rowVar, w, h };
+      return { bands: merged, rawBands: bands, rowMean, rowVar, bg, w, h };
     }
 
     // Merge consecutive bands separated by less than `gapThreshold`
@@ -1871,7 +1893,11 @@
           const margin = Math.floor(cached.h * MARGIN_PCT);
           const iy = Math.max(0, Math.min(cached.h - 1, Math.round(srcY)));
           if (iy < margin || iy >= cached.h - margin) {
-            return cached.rowVar[iy] <= snapConfig.gutter_tolerance;
+            return (
+              cached.rowVar[iy] <= snapConfig.gutter_tolerance &&
+              (cached.bg === undefined ||
+                Math.abs(cached.rowMean[iy] - cached.bg) <= 48)
+            );
           }
         }
         return false;
@@ -2001,19 +2027,21 @@
         if (!cached || !cached.rowMean) return null;
         const iy = Math.round(srcY);
         if (iy < 0 || iy >= cached.h) return null;
-        return { mean: cached.rowMean[iy], variance: cached.rowVar[iy] };
+        return { mean: cached.rowMean[iy], variance: cached.rowVar[iy], bg: cached.bg };
       }
       // "Is this still essentially empty space" — looser than the
       // band-detection threshold so phase 2 can keep scanning across
       // borderline rows that didn't qualify as a band (just over
-      // variance, or a too-short run). Color-agnostic — works for
-      // white, black, or any uniform background. Stops only at rows
-      // with real structure (variance > 5× the detection tolerance).
+      // variance, or a too-short run). Must also stay near the page
+      // background's brightness: flat-but-dark rows on a white page
+      // are a blurred panel opening, not empty space, and riding
+      // through them is what landed snaps inside the art.
       function isLooseGutterAtScroll(scrollPx) {
         const s = pixelStatsAtScroll(scrollPx);
         if (!s) return false;
         const tol = (snapConfig.gutter_tolerance || 300) * 5;
-        return s.variance <= tol;
+        if (s.variance > tol) return false;
+        return s.bg === undefined || Math.abs(s.mean - s.bg) <= 64;
       }
 
       // ── Snap target finder (legacy algorithm — see show.html.heex
