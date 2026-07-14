@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.3 (unreleased)
+
+* Panel snap rebuilt to legacy fidelity: gutter detection now analyzes
+  every source row at native resolution (legacy-style sparse column
+  sampling, sliced canvas — same speed class as before), the landing
+  rule is legacy's "first non-gutter row" (the dense-content
+  adjustment is now opt-in via `smart_landing`), the phase-2 noise
+  skip shrank from 2000 to 300 source-px and shares one content
+  predicate (dark OR sustained-variance — pale art can no longer be
+  skipped as noise) with band merging, and snaps now await detection
+  for the whole scan range instead of silently degrading to a raw
+  viewport jump on a cold cache.
+* Predictive snap queue: the next 7 forward snap targets are
+  precomputed from the resting position (and rebuilt on scroll/settle/
+  config change), stored as layout-shift-proof anchors — a tap
+  consumes a ready target with zero scan latency, and the build
+  doubles as image prewarm for the panels ahead.
+
 ## 0.1.2 (2026-07-14)
 
 * The mouse-gesture button (bottom-right) now shows a 4-directional

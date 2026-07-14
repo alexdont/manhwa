@@ -796,64 +796,97 @@
       });
     }
 
+    // Shared "does this row look like real content" predicate — used
+    // by band merging AND the phase-2 noise skip so the two can never
+    // disagree about what counts as a panel.
+    //
+    // A row is content when it's genuinely dark (mean < 200 — real
+    // text/art ink) OR carries sustained structure (variance above
+    // 2× the gutter tolerance — pale art, gradients, screentone all
+    // clear this at full-resolution detection; JPEG noise and band-
+    // edge spikes stay under it). A gap counts as real content only
+    // on a run of ≥ 8 consecutive content rows or >15% content rows
+    // overall — single-row spikes (page numbers, dust, block edges)
+    // don't survive either test.
+    const GAP_CONTENT_MEAN     = 200;
+    const GAP_CONTENT_VAR_MULT = 2;
+    const GAP_CONTENT_RUN      = 8;
+    const GAP_CONTENT_FRACTION = 0.15;
+    function gapHasRealContent(rowMean, rowVar, fromIy, toIy, tolerance) {
+      if (!rowMean) return false;
+      const varTol = (tolerance || 300) * GAP_CONTENT_VAR_MULT;
+      let run = 0, contentRows = 0;
+      const total = toIy - fromIy;
+      for (let iy = fromIy; iy < toIy; iy++) {
+        const content =
+          rowMean[iy] < GAP_CONTENT_MEAN || (rowVar && rowVar[iy] > varTol);
+        if (content) {
+          contentRows++;
+          if (++run >= GAP_CONTENT_RUN) return true;
+        } else {
+          run = 0;
+        }
+      }
+      return total > 0 && contentRows / total > GAP_CONTENT_FRACTION;
+    }
+
     function detectGuttersInImage(img) {
       const w = img.naturalWidth, h = img.naturalHeight;
       if (!w || !h) return { bands: [], w: 0, h: 0 };
-      const isMobile = /iPhone|iPad|Android|Mobile/i.test(navigator.userAgent);
-      const SCALE = isMobile ? 0.125 : 0.25;
-      const dw = Math.max(1, Math.floor(w * SCALE));
-      const dh = Math.max(1, Math.floor(h * SCALE));
-      const stripX0 = Math.floor(dw * 0.1);
-      const stripW  = Math.floor(dw * 0.9) - stripX0;
+      const x0 = Math.floor(w * 0.1);
+      const stripW = Math.floor(w * 0.9) - x0;
       if (stripW < 5) return { bands: [], w, h };
+      // Full-resolution rows, legacy-style sparse columns. The legacy
+      // reader's reliability came from probing native-resolution pixel
+      // rows (sampling every 4th pixel across the row); the previous
+      // 0.25×/0.125× downscale here AVERAGED pixels instead, which
+      // crushed variance — soft textures inside panels started
+      // classifying as gutters and thin structure vanished — while the
+      // tolerance (300) stayed tuned for the native-res signal.
+      //
+      // Every source row is analyzed exactly (band edges are vertical
+      // features, so vertical fidelity is what alignment depends on),
+      // columns are sampled every 4th pixel like legacy's isWhiteBand
+      // (sampling ≠ averaging: it preserves the variance signal).
+      // Processing runs in ≤1024-row slices through one reusable
+      // canvas, which bounds transient getImageData buffers to a few
+      // MB and stays far under iOS's canvas-area limit for very tall
+      // strips.
+      const SLICE = 1024;
       const c = document.createElement("canvas");
-      c.width = dw; c.height = dh;
-      const ctx = c.getContext("2d");
-      // null = transient canvas failure (e.g. live img evicted mid-
-      // draw) — caller retries later instead of caching empty bands.
-      try { ctx.drawImage(img, 0, 0, dw, dh); } catch (_) { return null; }
+      c.width = stripW;
+      c.height = Math.min(SLICE, h);
+      const ctx = c.getContext("2d", { willReadFrequently: true });
       const isWhite = new Uint8Array(h);
-      const tolerance = snapConfig.gutter_tolerance;
-      // Per-source-row mean/variance arrays — small extra cost (~32KB
-      // for an 8000-tall image) but lets the snap algorithm do live
-      // brightness checks at runtime without re-sampling pixels.
       const rowMean = new Float32Array(h);
       const rowVar  = new Float32Array(h);
-      // Gutter detection is variance-only (matches the legacy reader
-      // and `<show.html.heex>` `isWhiteBand`). Any low-variance row
-      // counts — pure white, pure black, solid color, or a panel-
-      // boundary cinematic transition. We previously required mean ≥
-      // 200 to avoid mid-tone phantom bands inside panels with
-      // uniform shadow areas, but that excluded legitimate black-
-      // background gutters used in flashback / dream sequences.
-      // Single getImageData over the whole strip — was 1-row-per-call
-      // in a 1000-iteration loop, which crossed into the canvas API
-      // ~1000× per panel and stretched detection to 50-200ms. One big
-      // pull + linear walk runs ~5-10× faster, so detection completes
-      // well inside the gap between a panel being decoded and the user
-      // arriving at it, and the await chain in findSnapTarget no longer
-      // sees a half-loaded gutter for a tall manhwa panel.
-      let rgba;
-      try {
-        rgba = ctx.getImageData(stripX0, 0, stripW, dh).data;
-      } catch (_) { return null; }
-      const cols = stripW;
-      const rowBytes = cols * 4;
-      for (let dy = 0; dy < dh; dy++) {
-        const rowOff = dy * rowBytes;
-        let sum = 0, sumSq = 0;
-        for (let i = 0; i < rowBytes; i += 4) {
-          const lum = 0.299 * rgba[rowOff + i] + 0.587 * rgba[rowOff + i + 1] + 0.114 * rgba[rowOff + i + 2];
-          sum += lum; sumSq += lum * lum;
-        }
-        if (cols === 0) continue;
-        const mean = sum / cols;
-        const variance = sumSq / cols - mean * mean;
-        const flag = (variance <= tolerance) ? 1 : 0;
-        const srcY0 = Math.floor(dy / SCALE);
-        const srcY1 = Math.min(h, Math.floor((dy + 1) / SCALE));
-        for (let y = srcY0; y < srcY1; y++) {
-          isWhite[y] = flag;
+      const tolerance = snapConfig.gutter_tolerance;
+      const colStride = 16; // every 4th RGBA pixel — matches legacy
+      // Gutter detection is variance-only (matches legacy isWhiteBand):
+      // any low-variance row counts — pure white, pure black, solid
+      // color, or a cinematic transition band.
+      for (let sy = 0; sy < h; sy += SLICE) {
+        const sh = Math.min(SLICE, h - sy);
+        let rgba;
+        // null = transient canvas failure (e.g. live img evicted mid-
+        // draw) — caller retries later instead of caching empty bands.
+        try {
+          ctx.drawImage(img, x0, sy, stripW, sh, 0, 0, stripW, sh);
+          rgba = ctx.getImageData(0, 0, stripW, sh).data;
+        } catch (_) { return null; }
+        const rowBytes = stripW * 4;
+        for (let dy = 0; dy < sh; dy++) {
+          const rowOff = dy * rowBytes;
+          let sum = 0, sumSq = 0, n = 0;
+          for (let i = 0; i < rowBytes; i += colStride) {
+            const lum = 0.299 * rgba[rowOff + i] + 0.587 * rgba[rowOff + i + 1] + 0.114 * rgba[rowOff + i + 2];
+            sum += lum; sumSq += lum * lum; n++;
+          }
+          if (!n) continue;
+          const mean = sum / n;
+          const variance = sumSq / n - mean * mean;
+          const y = sy + dy;
+          isWhite[y] = variance <= tolerance ? 1 : 0;
           rowMean[y] = mean;
           rowVar[y]  = variance;
         }
@@ -876,19 +909,28 @@
       if (bandStart !== -1 && ((h - margin) - bandStart) >= minBandRows) {
         bands.push([bandStart, h - margin]);
       }
-      const merged = mergeCloseBands(bands, snapConfig.gutter_merge_gap || 0);
+      const merged = mergeCloseBands(
+        bands, snapConfig.gutter_merge_gap || 0, rowMean, rowVar, tolerance
+      );
       return { bands: merged, rawBands: bands, rowMean, rowVar, w, h };
     }
 
     // Merge consecutive bands separated by less than `gapThreshold`
-    // source-px into one. See gutter_merge_gap doc for rationale.
-    function mergeCloseBands(bands, gapThreshold) {
+    // source-px into one — but ONLY when the gap carries no real
+    // content. The old unconditional merge could glue two tight
+    // gutters ACROSS a small panel or SFX between them, and the phase
+    // walk then landed past it. gapHasRealContent (dark rows OR
+    // sustained variance) keeps small/pale panels un-swallowed.
+    function mergeCloseBands(bands, gapThreshold, rowMean, rowVar, tolerance) {
       if (!bands || bands.length < 2 || gapThreshold <= 0) return bands.slice();
       const out = [bands[0].slice()];
       for (let i = 1; i < bands.length; i++) {
         const prev = out[out.length - 1];
         const cur = bands[i];
-        if (cur[0] - prev[1] < gapThreshold) {
+        if (
+          cur[0] - prev[1] < gapThreshold &&
+          !gapHasRealContent(rowMean, rowVar, prev[1], cur[0], tolerance)
+        ) {
           prev[1] = cur[1];
         } else {
           out.push(cur.slice());
@@ -1974,35 +2016,17 @@
         return s.variance <= tol;
       }
 
-      // ── Snap target finder (verbatim port of production's
-      // findSnapTarget — see show.html.heex line 753). Only the
-      // scroll surface is adapted: container.scrollTop instead of
-      // window.scrollY, container.clientHeight instead of
-      // window.innerHeight. Algorithm is identical otherwise.
-      // Post-process: always scan forward up to 2000 source-px from
-      // the snap target and land on the START of the next *sustained*
-      // content region.
+      // ── Snap target finder (legacy algorithm — see show.html.heex
+      // line 753). Only the scroll surface is adapted:
+      // container.scrollTop instead of window.scrollY,
+      // container.clientHeight instead of window.innerHeight.
       //
-      // Critical: rowVar is filled by duplicating one downsampled
-      // value across 4-8 source rows (SCALE=0.25 desktop, 0.125 mobile).
-      // So RUN_LEN must be ≥ 2 downsampled rows to filter out
-      // single-row spikes. 20 source-px ≈ 5 downsampled rows on
-      // desktop, 2.5 on mobile — comfortably above the per-row
-      // duplication so a 1-row band-edge variance spike no longer
-      // counts as content.
-      //
-      // Variance threshold 600 picks up:
-      //   - faint/light panel openings (soft gradients, pale art,
-      //     variance ~600-1000) — the old 1000 threshold scanned PAST
-      //     these to the first dense region, overshooting into the
-      //     panel instead of stopping at its visible start
-      //   - chat bubble borders (1-2% dark, variance ~600-1500)
-      //   - text rows (10%+ dark, variance 1000+)
-      //   - panel art / line work (variance 2000+)
-      // Skipped: pure white (~0), JPEG noise (<500), single-row spikes
-      // (no sustained run). Run length 16 source-px = 2 downsampled
-      // rows on mobile (SCALE 0.125), 4 on desktop — still above the
-      // per-row duplication floor described above.
+      // The landing rule is legacy's: the FIRST non-gutter row after
+      // the ridden-through gutter is the target — that's the panel
+      // start, and it's what aligns with the debug detection line.
+      // `findNextSustainedContent` (land at the first *dense* content
+      // instead) deliberately moved the landing off the panel start
+      // and is now opt-in via `snapConfig.smart_landing` only.
       const CONTENT_VARIANCE = 600;
       const CONTENT_RUN_LEN  = 16;
       const SCAN_MAX_SRC     = 2000;
@@ -2032,35 +2056,33 @@
         return scrollY;
       }
 
-      async function findSnapTargetCore(direction, traceMode) {
-        const startY    = container.scrollTop;
+      async function findSnapTargetCore(direction, traceMode, startYOverride) {
+        const startY    = startYOverride !== undefined ? startYOverride : container.scrollTop;
         const scanStep  = 5;
         const maxTravel = container.clientHeight * snapConfig.scan_distance;
         const debounce  = snapConfig.min_gutter_width || 50;
 
-        // Cold-cache strategy: await detection ONLY for the start idx
-        // (so the snap respects the gutter detection line — without it
-        // the scan would walk through unknown-color territory and land
-        // at a non-offset-adjusted position, i.e. the gutter doesn't
-        // sit on the 10%-from-top detection line). Kick off detection
-        // for the rest of the scan range without awaiting — they get
-        // warmed in the background so the next tap finds a hot cache.
-        // Detection per image is ~10-30ms with the batched getImageData
-        // path; image-loaded already fired the detection for most idxs
-        // before the user reaches them, so the await is usually a no-op.
+        // Cold-cache strategy: await detection for EVERY image in the
+        // scan range. An un-analyzed image reads as "not a gutter", so
+        // the old fire-and-forget warm let the phase walk sail through
+        // unknown territory and fall back to a raw 3-viewport jump —
+        // the "sometimes it just doesn't snap" failure. The range is
+        // ≤ ~4 images at ~10-40ms each, is almost always prewarmed
+        // already (image-loaded + the predictive queue's own builds),
+        // so this await is a no-op on the hot path and a one-off
+        // ~100ms on a truly cold first tap — a snap that lands right
+        // beats one that fires instantly into the wrong place.
         const loY = direction > 0 ? startY : Math.max(0, startY - maxTravel);
         const hiY = direction > 0 ? startY + maxTravel : startY;
         const loIdx = scrollPxToImagePos(loY).imageIdx;
         const hiIdx = scrollPxToImagePos(hiY).imageIdx;
-        const startIdx = scrollPxToImagePos(startY).imageIdx;
-        if (startIdx >= 0 && startIdx < sources.length && !gutterCache.has(startIdx)) {
-          await gutterFor(startIdx, sources);
-        }
+        const waits = [];
         for (let i = loIdx; i <= hiIdx; i++) {
-          if (i >= 0 && i < sources.length && i !== startIdx && !gutterCache.has(i)) {
-            gutterFor(i, sources);
+          if (i >= 0 && i < sources.length && !gutterCache.has(i)) {
+            waits.push(gutterFor(i, sources));
           }
         }
+        if (waits.length) await Promise.all(waits);
 
         // Debounced gutter check: requires `debounce` source-px of
         // continuous white after panel content before counting as gutter.
@@ -2099,44 +2121,17 @@
           // detection split). Jump past that next band and keep scanning.
           // Only return when there's no nearby band — that's a real
           // panel start.
-          const bandSkipDistance = snapConfig.gutter_skip_noise ?? 2000;
-          // Content detection for a gap between two gutter bands.
-          // Per-row "content" = mean < 220 OR variance > 800 (text,
-          // art, lines, panel border).
-          // A gap counts as REAL content only if it has either:
-          //   - a run of ≥ 8 consecutive content rows (text paragraph,
-          //     panel border + interior, art region), OR
-          //   - more than 10% of rows are content (sparse but dense
-          //     enough to be real, e.g. scattered text).
-          // Otherwise it's classed as in-gutter noise (page edge,
-          // JPEG block boundary, dust, scattered artifacts) → chain
-          // skips past it.
-          // Real-content detector for a gap between two gutter bands.
-          // Only checks mean (variance is too easy to trip on thin
-          // black lines that are not real content). A row counts as
-          // content only when it's GENUINELY dark (mean < 200, i.e.
-          // 20%+ dark pixels in the row, which is real text/art).
-          // Faint borders, JPEG noise, sparse stippling — all have
-          // mean > 200 and are skipped.
-          const CONTENT_MEAN     = 200;
-          const CONTENT_RUN_LEN  = 8;
-          const CONTENT_FRACTION = 0.15;
-          function gapHasRealContent(rowMean, rowVar, fromIy, toIy) {
-            if (!rowMean) return false;
-            let run = 0;
-            let contentRows = 0;
-            const total = toIy - fromIy;
-            for (let iy = fromIy; iy < toIy; iy++) {
-              if (rowMean[iy] < CONTENT_MEAN) {
-                contentRows++;
-                run++;
-                if (run >= CONTENT_RUN_LEN) return true;
-              } else {
-                run = 0;
-              }
-            }
-            return total > 0 && (contentRows / total) > CONTENT_FRACTION;
-          }
+          // Noise-skip radius, sharply reduced from the old 2000: a
+          // 2000-source-px window could classify an entire small or
+          // pale panel between two gutters as "noise" and skip it —
+          // the main overshoot source vs the legacy reader, which
+          // stopped at ANY sustained non-white. 300px only bridges
+          // gaps on the scale of a real gutter's internal noise.
+          // Content decisions use the shared gapHasRealContent
+          // predicate (dark rows OR sustained variance), so pale art
+          // counts as content here exactly like it does in band
+          // merging.
+          const bandSkipDistance = snapConfig.gutter_skip_noise ?? 300;
           // Walk forward through bands in the same image, chaining any
           // bands whose gaps contain no real content. Returns the
           // scroll y at the end of the last chained band, or null.
@@ -2162,14 +2157,14 @@
                 if (trace) trace.push({ step: "break-gap-too-large", i, gap, bandSkipDistance });
                 break;
               }
-              const hasContent = gapHasRealContent(rowMean, rowVar, endIy, bands[i][0]);
+              const hasContent = gapHasRealContent(rowMean, rowVar, endIy, bands[i][0], snapConfig.gutter_tolerance);
               if (trace) {
                 // Sample some rows to show in the trace
                 const samples = [];
                 const sampleStep = Math.max(1, Math.floor(gap / 20));
                 let contentCount = 0;
                 for (let iy = endIy; iy < bands[i][0]; iy += sampleStep) {
-                  if (rowMean[iy] < CONTENT_MEAN) contentCount++;
+                  if (rowMean[iy] < GAP_CONTENT_MEAN) contentCount++;
                   samples.push({ iy, m: Math.round(rowMean[iy]), v: Math.round(rowVar[iy]) });
                 }
                 trace.push({ step: "gap-check", i, fromIy: endIy, toIy: bands[i][0], gap, hasContent, nextBand: bands[i], samples });
@@ -2225,27 +2220,19 @@
                   if (b[0] > srcY) { nextBand = b; break; }
                 }
                 if (nextBand && (nextBand[0] - srcY) <= bandSkipDistance) {
-                  // Content-aware skip: scan the rows between srcY and
-                  // nextBand.start for *any* row with real darkness
-                  // (mean < contentThreshold). If none exist, the gap
-                  // is a noise/artifact area inside what is visually a
-                  // single gutter — skip past nextBand and resume scan.
-                  // If any darker row exists, there's a real panel in
-                  // the gap (chat bubble with text, art, etc.) → return
-                  // y so the snap lands at it.
-                  const contentThreshold = 220;
-                  const rowMean = cached.rowMean;
-                  let hasContent = false;
-                  if (rowMean) {
-                    const startIy = Math.max(0, Math.round(srcY));
-                    const endIy   = Math.min(cached.h, nextBand[0]);
-                    for (let iy = startIy; iy < endIy; iy++) {
-                      if (rowMean[iy] < contentThreshold) { hasContent = true; break; }
-                    }
-                  } else {
-                    // No per-row data — fall back to optimistic skip
-                    // (matches old behavior for un-analyzed images).
-                  }
+                  // Content-aware skip: if the rows between srcY and
+                  // nextBand.start carry no real content (dark rows OR
+                  // sustained variance — the shared predicate, so pale
+                  // art counts), the gap is noise inside what is
+                  // visually one gutter → skip past nextBand and
+                  // resume. Any real content → return y so the snap
+                  // lands at it, exactly like legacy stopped at any
+                  // sustained non-white.
+                  const startIy = Math.max(0, Math.round(srcY));
+                  const endIy   = Math.min(cached.h, nextBand[0]);
+                  const hasContent = gapHasRealContent(
+                    cached.rowMean, cached.rowVar, startIy, endIy, snapConfig.gutter_tolerance
+                  );
                   if (!hasContent) {
                     const skipTo = imagePosToScrollPx(imageIdx, nextBand[1]);
                     if (typeof skipTo === "number" && skipTo > y) {
@@ -2293,9 +2280,14 @@
         return startY + direction * maxTravel;
       }
 
-      async function findSnapTarget(direction, traceMode) {
-        const raw = await findSnapTargetCore(direction, traceMode);
-        if (direction > 0) {
+      async function findSnapTarget(direction, traceMode, startYOverride) {
+        const raw = await findSnapTargetCore(direction, traceMode, startYOverride);
+        // Legacy landing rule: the first non-gutter row IS the target —
+        // it's what lines up with the debug detection line. The
+        // "sustained content" adjustment (land at the first *dense*
+        // region instead) moved landings into the panel on soft/pale
+        // openings; opt back in per-manga via snapConfig.smart_landing.
+        if (direction > 0 && snapConfig.smart_landing) {
           const adjusted = findNextSustainedContent(raw);
           if (traceMode) {
             console.log("[snap-trace] raw=" + Math.round(raw) + " adjusted=" + Math.round(adjusted) + " scrollTop=" + Math.round(container.scrollTop));
@@ -2304,6 +2296,77 @@
         }
         return raw;
       }
+
+      // ── Predictive snap queue ─────────────────────────────────────
+      // Precomputes the next N forward snap targets from the current
+      // resting position, chaining findSnapTargetCore from each target
+      // to the next — so a tap consumes a ready-made target with zero
+      // scan latency, and the detection awaits inside the build double
+      // as prewarm for the next ~N panels' images.
+      //
+      // Targets are stored as layout-independent anchors (imageIdx +
+      // source row) and resolved to pixels at consume time, so aspect
+      // corrections / dims updates / chapter appends shift them
+      // correctly instead of invalidating them. The queue only fully
+      // flushes on config changes (different knobs = different
+      // targets). A generation token aborts superseded builds.
+      const SNAP_QUEUE_DEPTH = 7;
+      let snapQueue = [];
+      let snapQueueGen = 0;
+
+      function queueAnchorFromPx(px) {
+        const pos = scrollPxToImagePos(px + gutterDetectOffset());
+        return { imageIdx: pos.imageIdx, srcY: pos.srcY };
+      }
+      function queueAnchorToPx(a) {
+        return imagePosToScrollPx(a.imageIdx, a.srcY);
+      }
+      async function rebuildSnapQueue() {
+        if (!panelSnapEnabled) { snapQueue = []; return; }
+        const gen = ++snapQueueGen;
+        const fresh = [];
+        let fromY = container.scrollTop;
+        for (let n = 0; n < SNAP_QUEUE_DEPTH; n++) {
+          let t = await findSnapTargetCore(1, false, fromY);
+          // Same optional adjustment the live path applies, so queued
+          // and live targets can never disagree.
+          if (snapConfig.smart_landing) t = findNextSustainedContent(t);
+          if (gen !== snapQueueGen) return; // superseded by a newer build
+          if (!(t > fromY + 1)) break;      // end of strip / no progress
+          fresh.push(queueAnchorFromPx(t));
+          fromY = t;
+        }
+        if (gen === snapQueueGen) snapQueue = fresh;
+      }
+      // First queue entry still ahead of the current position (passed
+      // entries are dropped). Returns a resolved pixel or null.
+      function peekQueuedTarget() {
+        const cur = container.scrollTop;
+        while (snapQueue.length) {
+          const px = queueAnchorToPx(snapQueue[0]);
+          if (px == null) { snapQueue.shift(); continue; }
+          if (px > cur + 4) return px;
+          snapQueue.shift();
+        }
+        return null;
+      }
+      function flushSnapQueue() {
+        snapQueueGen++;
+        snapQueue = [];
+      }
+      let queueRebuildTimer = null;
+      function scheduleQueueRebuild(delay) {
+        clearTimeout(queueRebuildTimer);
+        queueRebuildTimer = setTimeout(() => { rebuildSnapQueue(); }, delay ?? 200);
+      }
+      // Keep the queue anchored to wherever the user settles — free
+      // scrolling shifts which targets are "next". Programmatic snap
+      // motion is excluded (snapTo rebuilds explicitly on settle).
+      container.addEventListener("scroll", () => {
+        if (!snapMotionActive && !snapping) scheduleQueueRebuild(300);
+      }, { passive: true });
+      // Initial build once layout has settled after mount/resume.
+      scheduleQueueRebuild(600);
 
       // ── Find the next gutter starting from a known panel-start ────
       // findSnapTarget returns the y where a new panel BEGINS (i.e.,
@@ -2576,7 +2639,13 @@
             await performSnapMotion(startNoSnap + deltaNoSnap, behavior, false);
             return;
           }
-          const target = await findSnapTarget(direction, snapDebugOn);
+          // Fast path: consume a precomputed target from the
+          // predictive queue (forward snaps only; debug mode always
+          // computes live so traces reflect the real algorithm walk).
+          const queuedPx = (direction > 0 && !snapDebugOn) ? peekQueuedTarget() : null;
+          const target = queuedPx != null
+            ? queuedPx
+            : await findSnapTarget(direction, snapDebugOn);
           const start  = container.scrollTop;
 
           // Long-panel detector — fires the half-step path when either:
@@ -2597,6 +2666,11 @@
           // (where absDist and panelLen are both small).
           const { scrollTarget, panelEnd, panelLen, isLongPan, curLong, nextLong } =
             await resolveScrollTarget(direction, start, target);
+
+          // Consume the queue head only when we're actually landing at
+          // it — a long-panel half-step leaves the target ahead, so the
+          // next tap re-uses the same precomputed entry.
+          if (queuedPx != null && scrollTarget === queuedPx) snapQueue.shift();
 
           if (debugCtx) {
             debugCtx.mode = "snap";
@@ -2652,6 +2726,9 @@
           // 400ms-in snapshot of a still-moving scroll.
           snapping = false;
           if (debugCtx) showVerdictBar(debugCtx);
+          // Top the predictive queue back up from the landing position
+          // (short delay so a queued replay tap goes first).
+          scheduleQueueRebuild(80);
           const q = queuedSnapDir;
           queuedSnapDir = 0;
           if (q) snapTo(q);
@@ -3005,6 +3082,11 @@
 
       window.__stripHandle = handle;
       window.__stripSnap   = snapTo;
+      // Predictive-queue controls for the (module-scope) snap-config
+      // handlers: a config change means different targets, so flush
+      // and rebuild from the current position.
+      window.__stripFlushSnapQueue   = flushSnapQueue;
+      window.__stripRebuildSnapQueue = () => scheduleQueueRebuild(50);
       // Read accessors for the desktop pointer-lock gesture handler —
       // it lives outside this closure and needs the current snap-mode
       // flag plus the user's scroll-speed multiplier (turtle / rabbit).
@@ -3698,6 +3780,8 @@
       panelSnapEnabled = !!e.target.checked;
       localStorage.setItem(SNAP_ON_KEY, panelSnapEnabled ? "true" : "false");
       syncSettingsUI();
+      window.__stripFlushSnapQueue?.();
+      window.__stripRebuildSnapQueue?.();
     });
 
     // ── Snap-config changes (persist + apply) ────────────────────
@@ -3711,6 +3795,10 @@
         detecting.clear();
       }
       syncSettingsUI();
+      // Different knobs = different targets — rebuild the predictive
+      // queue under the new config.
+      window.__stripFlushSnapQueue?.();
+      window.__stripRebuildSnapQueue?.();
     }
     document.querySelectorAll(".strip-snap-jump-btn").forEach((btn) => {
       btn.addEventListener("click", () => updateSnapConfig({ jump_style: btn.dataset.value }));
@@ -3736,6 +3824,8 @@
       gutterCache.clear();
       detecting.clear();
       syncSettingsUI();
+      window.__stripFlushSnapQueue?.();
+      window.__stripRebuildSnapQueue?.();
     });
 
     // ── Tap-zone preset ──────────────────────────────────────────
