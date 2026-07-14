@@ -1771,8 +1771,15 @@
         const target = imgEl(RESUME_IDX);
         if (!target || !target.offsetHeight) return;
         resumed = true;
-        const y = Math.round(target.offsetTop + RESUME_FRAC * target.offsetHeight);
-        container.scrollTop = y;
+        // The saved fraction marks the content at the VIEWPORT CENTER
+        // (snapshotMultiChapterState measures from the middle of the
+        // screen) — restore must anchor it back at the center, not the
+        // top, or every resume lands half a viewport lower than where
+        // the user actually stopped.
+        const y = Math.round(
+          target.offsetTop + RESUME_FRAC * target.offsetHeight - container.clientHeight / 2
+        );
+        container.scrollTop = Math.max(0, y);
       }
 
       function maybeResumeScroll(_loadedIdx) {
@@ -2387,11 +2394,20 @@
         clearTimeout(queueRebuildTimer);
         queueRebuildTimer = setTimeout(() => { rebuildSnapQueue(); }, delay ?? 200);
       }
+      // Snap-alignment state: true when the current position came from
+      // the user (free scroll, page load/resume) rather than from our
+      // own snap landing. Starts broken so the first tap after a
+      // resume re-aligns to a panel start instead of half-stepping
+      // from an arbitrary restore position.
+      let alignmentBroken = true;
       // Keep the queue anchored to wherever the user settles — free
       // scrolling shifts which targets are "next". Programmatic snap
       // motion is excluded (snapTo rebuilds explicitly on settle).
       container.addEventListener("scroll", () => {
-        if (!snapMotionActive && !snapping) scheduleQueueRebuild(300);
+        if (!snapMotionActive && !snapping) {
+          alignmentBroken = true;
+          scheduleQueueRebuild(300);
+        }
       }, { passive: true });
       // Initial build once layout has settled after mount/resume.
       scheduleQueueRebuild(600);
@@ -2461,6 +2477,18 @@
       //     panel. Subsequent taps handle long-panel reading via the
       //     half-step branch once absDist > stepSize.
       async function resolveScrollTarget(direction, start, target) {
+        // Free-scrolling breaks snap alignment — the user's position is
+        // arbitrary, so a half-step from it would land arbitrarily too.
+        // The first tap after manual scrolling always goes straight to
+        // the nearest snap target (the panel start findSnapTarget
+        // found), re-aligning the reader; half-stepping resumes from
+        // aligned positions on the following taps.
+        if (alignmentBroken) {
+          return {
+            scrollTarget: target, panelEnd: target, panelLen: 0,
+            isLongPan: false, curLong: false, nextLong: false
+          };
+        }
         const vh = container.clientHeight;
         const absDist = Math.abs(target - start);
         const panelEnd = await findPanelEnd(target, direction);
@@ -2723,6 +2751,10 @@
               " behavior=" + behavior);
           }
           const settle = await performSnapMotion(scrollTarget, behavior, true);
+          // A completed snap landing IS an aligned position; a user-
+          // interrupted one isn't (their gesture also re-breaks via the
+          // scroll listener, this just avoids a window where it's unset).
+          if (!settle.interrupted) alignmentBroken = false;
           if (debugCtx) debugCtx.settle = settle;
           if (snapDebugOn) {
             console.log("[snap-trace] settled scrollTop=" + Math.round(container.scrollTop) +
