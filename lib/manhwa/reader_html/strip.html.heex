@@ -2406,6 +2406,14 @@
       container.addEventListener("scroll", () => {
         if (!snapMotionActive && !snapping) {
           alignmentBroken = true;
+          // Flush NOW, not at the debounced rebuild: queue entries were
+          // chained from the pre-scroll position, and consuming them
+          // after the user moved (especially back UP) skips past the
+          // targets between — each tap landing one position deeper.
+          // With the queue empty, a tap before the rebuild finishes
+          // computes live from the current position (a few ms on the
+          // hot cache), which is always the nearest downward target.
+          flushSnapQueue();
           scheduleQueueRebuild(300);
         }
       }, { passive: true });
