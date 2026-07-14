@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 (2026-07-14)
+
+* Fix: the nav's prev/next chapter arrows now retarget to the dominant
+  chapter's neighbours as the strip auto-appends chapters — they were
+  server-rendered against the landing chapter and went stale (the
+  chapter label already synced). The next-arrow hides past the last
+  known chapter instead of keeping a stale target.
+
 ## 0.1.1 (2026-07-13)
 
 * Fix: the strip page assumed the host's user struct has a `.uuid`

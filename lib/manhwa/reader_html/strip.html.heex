@@ -1495,6 +1495,34 @@
         if (dLbl && dLbl.textContent !== text) dLbl.textContent = text;
       }
 
+      // Retarget the nav's prev/next arrow anchors at the dominant
+      // chapter's neighbours — server-rendered hrefs are relative to
+      // the chapter the user landed on and go stale as the strip
+      // auto-appends chapters. Neighbours come from loadedChapters;
+      // for the tail chapter the next name is recovered from its
+      // images-API URL (`.../CHAPTER/images`). The initial chapter's
+      // server-rendered prev href is already correct and stays.
+      function syncChapterNavLinks(chapter) {
+        const i = loadedChapters.findIndex((c) => c.chapter === chapter);
+        if (i < 0) return;
+        const base = SHELL.dataset.settingsBase;
+        if (i > 0) {
+          const prevUrl = base + "/" + encodeURIComponent(loadedChapters[i - 1].chapter);
+          document.querySelectorAll('a[title="Previous chapter"]').forEach((a) => { a.href = prevUrl; });
+        }
+        let nextUrl = "";
+        if (i < loadedChapters.length - 1) {
+          nextUrl = base + "/" + encodeURIComponent(loadedChapters[i + 1].chapter);
+        } else if (loadedChapters[i].nextChapterApi) {
+          const seg = loadedChapters[i].nextChapterApi.split("/").slice(-2)[0];
+          if (seg) nextUrl = base + "/" + seg;
+        }
+        document.querySelectorAll('a[title="Next chapter"]').forEach((a) => {
+          if (nextUrl) a.href = nextUrl;
+          a.classList.toggle("hidden", !nextUrl);
+        });
+      }
+
       function maybeUpdateUrlForDominantChapter() {
         const st = snapshotMultiChapterState();
         if (!st) return;
@@ -1502,6 +1530,7 @@
         if (st.chapter !== lastObservedChapter) {
           lastObservedChapter = st.chapter;
           SHELL.dataset.chapter = st.chapter;
+          syncChapterNavLinks(st.chapter);
           const newUrl = SHELL.dataset.settingsBase + "/" + encodeURIComponent(st.chapter);
           try { history.replaceState({ chapter: st.chapter }, "", newUrl); } catch (_) {}
         }
