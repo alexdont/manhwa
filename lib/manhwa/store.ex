@@ -71,7 +71,12 @@ defmodule Manhwa.Store do
   Page list for a chapter. `opts[:dims]` hints the dimension fidelity the
   caller needs — `:precise` (paged reading; per-page dims drive spread
   pairing) or `:fast` (strip reading; sampled/estimated dims are fine).
-  Stores may ignore the hint; pages missing dims get reader defaults.
+  Stores may ignore the hint; pages missing dims get reader defaults —
+  but real dims make layout, scroll restore, and panel snapping stable
+  before any image loads. If your source only yields URLs, the
+  [`dims`](https://hex.pm/packages/dims) package probes width × height
+  cheaply (`Dims.probe_all/2` for `:precise`, `Dims.probe_sampled/2`
+  for `:fast`).
   """
   @callback fetch_pages(user, series, chapter, opts :: keyword) ::
               {:ok, [page]} | {:error, term}

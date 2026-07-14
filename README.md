@@ -58,6 +58,22 @@ config :manhwa,
   series_url: {MyAppWeb.ReaderGlue, :series_url}        # (series) -> details page path
 ```
 
+The reader never fetches content itself — your store supplies the page
+URLs, ideally **with dimensions** (`fetch_pages` returning
+`%{url, width, height}`): correct dims up-front mean stable layout,
+scroll positions, and snap targets before a single image loads. If
+your source only gives you URLs, [`dims`](https://hex.pm/packages/dims)
+does exactly this job — it probes width × height from a ~128 KB HTTP
+Range fetch, with batch/sampling/median-backfill strategies sized for
+chapter-length lists:
+
+```elixir
+def fetch_pages(_user, series, chapter, opts) do
+  urls = MySource.chapter_image_urls(series, chapter)
+  {:ok, if(opts[:dims] == :precise, do: Dims.probe_all(urls), else: Dims.probe_sampled(urls))}
+end
+```
+
 **3. JS** — import fresco_strip's hooks in `assets/js/app.js` (plus etcher's
 if you use annotations):
 
