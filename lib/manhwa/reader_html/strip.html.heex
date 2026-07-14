@@ -2102,11 +2102,28 @@
         return scrollY;
       }
 
+      // Display px per source px at the given scroll position — the
+      // scan debounce is configured in SOURCE pixels (matching band
+      // detection), so walks must convert it to the current rendering
+      // scale. With page padding / small windows images render well
+      // below source scale, and an unconverted 50px scroll-space
+      // debounce silently disqualified real gutters (the walk then
+      // skipped whole panels and their text bubbles).
+      function sourceToDisplayRatio(scrollPx) {
+        const { imageIdx } = scrollPxToImagePos(scrollPx + gutterDetectOffset());
+        const el = imgEl(imageIdx);
+        const srcH = sources[imageIdx]?.height || 0;
+        if (!el || !el.offsetHeight || srcH <= 0) return 1;
+        return el.offsetHeight / srcH;
+      }
+
       async function findSnapTargetCore(direction, traceMode, startYOverride) {
         const startY    = startYOverride !== undefined ? startYOverride : container.scrollTop;
         const scanStep  = 5;
         const maxTravel = container.clientHeight * snapConfig.scan_distance;
-        const debounce  = snapConfig.min_gutter_width || 50;
+        const debounce  = Math.max(
+          4, (snapConfig.min_gutter_width || 50) * sourceToDisplayRatio(startY)
+        );
 
         // Cold-cache strategy: await detection for EVERY image in the
         // scan range. An un-analyzed image reads as "not a gutter", so
@@ -2405,18 +2422,11 @@
         clearTimeout(queueRebuildTimer);
         queueRebuildTimer = setTimeout(() => { rebuildSnapQueue(); }, delay ?? 200);
       }
-      // Snap-alignment state: true when the current position came from
-      // the user (free scroll, page load/resume) rather than from our
-      // own snap landing. Starts broken so the first tap after a
-      // resume re-aligns to a panel start instead of half-stepping
-      // from an arbitrary restore position.
-      let alignmentBroken = true;
       // Keep the queue anchored to wherever the user settles — free
       // scrolling shifts which targets are "next". Programmatic snap
       // motion is excluded (snapTo rebuilds explicitly on settle).
       container.addEventListener("scroll", () => {
         if (!snapMotionActive && !snapping) {
-          alignmentBroken = true;
           // Flush NOW, not at the debounced rebuild: queue entries were
           // chained from the pre-scroll position, and consuming them
           // after the user moved (especially back UP) skips past the
@@ -2465,7 +2475,11 @@
         if (!gutterCache.has(fromIdx)) return fromY;
 
         const scanStep = 5;
-        const debounce = snapConfig.min_gutter_width || 50;
+        // Source-px config converted to the local rendering scale —
+        // see sourceToDisplayRatio.
+        const debounce = Math.max(
+          4, (snapConfig.min_gutter_width || 50) * sourceToDisplayRatio(fromY)
+        );
         const state = { lastNonWhite: fromY };
         // Step in by one scan unit so we don't immediately re-detect
         // the gutter that ended the panel we're measuring (fromY is
@@ -2498,18 +2512,12 @@
       // we full-snap to that next panel's start — revealing it from the
       // top — instead of half-stepping into an arbitrary mid-position.
       async function resolveScrollTarget(direction, start, target) {
-        // Free-scrolling breaks snap alignment — the user's position is
-        // arbitrary, so a half-step from it would land arbitrarily too.
-        // The first tap after manual scrolling always goes straight to
-        // the nearest snap target (the panel start findSnapTarget
-        // found), re-aligning the reader; half-stepping resumes from
-        // aligned positions on the following taps.
-        if (alignmentBroken) {
-          return {
-            scrollTarget: target, panelEnd: target, panelLen: 0,
-            isLongPan: false, curLong: false, nextLong: false
-          };
-        }
+        // NOTE: no special-casing for free-scrolled ("unaligned")
+        // positions anymore — the fold rule below is position-exact,
+        // so it does the right thing from arbitrary positions too:
+        // current panel crossing the fold → half-step (that content is
+        // unread wherever the position came from); otherwise → full
+        // snap to the nearest target, which IS the realign behavior.
         const vh = container.clientHeight;
         const absDist = Math.abs(target - start);
         const stepSize = vh * 0.5;
@@ -2791,10 +2799,6 @@
               " behavior=" + behavior);
           }
           const settle = await performSnapMotion(scrollTarget, behavior, true);
-          // A completed snap landing IS an aligned position; a user-
-          // interrupted one isn't (their gesture also re-breaks via the
-          // scroll listener, this just avoids a window where it's unset).
-          if (!settle.interrupted) alignmentBroken = false;
           if (debugCtx) debugCtx.settle = settle;
           if (snapDebugOn) {
             console.log("[snap-trace] settled scrollTop=" + Math.round(container.scrollTop) +
