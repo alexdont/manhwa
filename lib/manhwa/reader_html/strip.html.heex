@@ -2484,17 +2484,19 @@
       // returns where the snap will *actually* land — used by both the
       // snap action and the debug overlay so the two never diverge.
       //
-      // Tuned 2026-05-22 from verdict logs (/tmp/fresco_debug.log) +
-      // live debug overlay feedback:
-      //   - Threshold lowered 1.3·vh → 1.1·vh: borderline panels
-      //     (~1100px at vh≈937) had been rated `bad` because they fell
-      //     just under the long flag.
-      //   - When close to the next panel boundary (absDist ≤ stepSize),
-      //     always land AT target — visual feedback confirmed users want
-      //     clean snap to the panel start (chat bubble top, panel edge,
-      //     etc.) rather than overshooting partway into a long next
-      //     panel. Subsequent taps handle long-panel reading via the
-      //     half-step branch once absDist > stepSize.
+      // Forward half-step rule (2026-07-14 rework): half-step iff the
+      // CURRENT panel — the one under the reading probe — extends past
+      // the bottom of the viewport. That's the exact "there's unread
+      // content below the fold" condition, and it's device/zoom/page-
+      // padding independent (the old absDist ≥ 1.1·vh proxy stopped
+      // firing on narrow layouts where display heights shrink — a text
+      // bubble hanging just below the fold got skipped entirely).
+      //
+      // The two-panels-at-the-fold case sorts itself out: if what's cut
+      // off at the bottom is a DIFFERENT panel (there's a gutter between
+      // it and the current one), the current panel ends on-screen, so
+      // we full-snap to that next panel's start — revealing it from the
+      // top — instead of half-stepping into an arbitrary mid-position.
       async function resolveScrollTarget(direction, start, target) {
         // Free-scrolling breaks snap alignment — the user's position is
         // arbitrary, so a half-step from it would land arbitrarily too.
@@ -2510,28 +2512,47 @@
         }
         const vh = container.clientHeight;
         const absDist = Math.abs(target - start);
+        const stepSize = vh * 0.5;
+
+        if (snapConfig.long_panel_steps && direction === 1) {
+          // Where does the panel under the probe end? findPanelEnd
+          // returns the scroll-y whose probe hits the gutter after it;
+          // + offset converts to the panel end's CONTENT position,
+          // comparable against the viewport bottom. (Resting on a
+          // gutter resolves within the debounce distance — "ends on
+          // screen" — so gutter starts full-snap as before. Unknown/
+          // cold gutter data short-circuits to `start`, same policy.)
+          const panelEnd = await findPanelEnd(start, 1);
+          const panelEndContent = panelEnd + gutterDetectOffset();
+          const viewportBottom = start + vh;
+          // Small tolerance so a panel ending within a sliver of the
+          // fold doesn't force a pointless extra step.
+          const OFFSCREEN_EPS = 16;
+          const extendsPastBottom = panelEndContent - viewportBottom > OFFSCREEN_EPS;
+          const panelLen = Math.max(0, panelEnd - start);
+          if (extendsPastBottom && absDist > stepSize) {
+            return {
+              scrollTarget: start + stepSize,
+              panelEnd, panelLen, isLongPan: true, curLong: true, nextLong: false
+            };
+          }
+          return {
+            scrollTarget: target,
+            panelEnd, panelLen, isLongPan: false, curLong: false, nextLong: false
+          };
+        }
+
+        // Backward (and long_panel_steps off): distance-based rule,
+        // unchanged — backward reading revisits content the user has
+        // already seen, so fold-precision matters less than momentum.
         const panelEnd = await findPanelEnd(target, direction);
         const panelLen = Math.abs(panelEnd - target);
-        const longThreshold = vh * 1.1;
-        const curLong  = snapConfig.long_panel_steps && absDist  >= longThreshold;
-        const nextLong = snapConfig.long_panel_steps && panelLen >= longThreshold;
-        // Only curLong triggers half-step. nextLong is redundant: once
-        // we land at the long panel's start, the next tap's absDist
-        // spans the long panel and curLong fires for the half-step.
-        // Keeping nextLong here caused snap to mid-step into the gutter
-        // when entering a long panel from a short distance.
-        const isLongPan = curLong;
-        const stepSize = vh * 0.5;
+        const isLongPan = snapConfig.long_panel_steps && absDist >= vh * 1.1;
         let scrollTarget = target;
         if (isLongPan && absDist > stepSize) {
-          // Inside a long current panel (or far enough that a half-step
-          // doesn't overshoot target) — half-step through it. The
-          // close-to-target case (absDist ≤ stepSize) always falls
-          // through to `target` so the snap lands cleanly at the panel
-          // boundary the user can see.
           scrollTarget = start + direction * stepSize;
         }
-        return { scrollTarget, panelEnd, panelLen, isLongPan, curLong, nextLong };
+        return { scrollTarget, panelEnd, panelLen, isLongPan, curLong: isLongPan, nextLong: false };
       }
 
       // ── Snap action (verbatim port of production's smartScroll,
