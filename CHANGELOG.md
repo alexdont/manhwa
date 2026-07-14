@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.4 (2026-07-14)
+
+* Half-stepping now keys on the exact condition — the current panel
+  extending past the bottom of the viewport (unread content below the
+  fold) — instead of the distance-to-next-target proxy, which stopped
+  firing on narrow layouts (page padding, small windows) and skipped
+  panel bottoms with trailing text bubbles. If the fold instead cuts a
+  *different* panel (gutter between), the snap goes to that panel's
+  start, revealing it from the top.
+* The scan debounce (`min_gutter_width`, a source-px setting) now
+  converts to the local rendering scale — real gutters no longer
+  vanish from targeting when images render below source scale, which
+  had fused panels and their text bubbles into one jump.
+* The free-scroll realign special case is gone: the fold rule is
+  position-exact, so arbitrary positions get the right behavior
+  naturally (half-step iff the current panel crosses the fold,
+  otherwise full snap to the nearest target).
+
 ## 0.1.3 (2026-07-14)
 
 * Panel snap rebuilt to legacy fidelity: gutter detection now analyzes
