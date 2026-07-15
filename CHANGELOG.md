@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.6 (2026-07-15)
+
+* Reading-time fix: crossing a chapter boundary in the infinite
+  scroll now flushes accumulated time against the *outgoing* chapter
+  first. Previously, finishing a chapter without a ≥500ms scroll
+  pause on its last pages meant those pages were never reported —
+  the host app's near-end/chapter-count logic never fired and the
+  reading time was attributed to the next chapter. Scrolling down
+  out of a chapter pins the report to its last page (the end was
+  read through); scrolling back up flushes at the departure position.
+
 ## 0.1.5 (2026-07-14)
 
 * Docs: the Store's page-dimensions contract now points implementors

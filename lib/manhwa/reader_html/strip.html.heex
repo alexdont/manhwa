@@ -1312,6 +1312,11 @@
       let loadingNextChapter = false;
       let loadingDivider = null;
       let lastObservedChapter = SHELL.dataset.chapter;
+      // Last dominant-image snapshot, updated on every scroll — when
+      // the dominant chapter flips, this still holds the final
+      // position inside the outgoing chapter (see the boundary flush
+      // in maybeUpdateUrlForDominantChapter).
+      let prevChapterSnap = null;
 
       function showLoadingDivider() {
         if (!loadingDivider) {
@@ -1524,12 +1529,12 @@
         return { chapter: meta.chapter, page: localPage, totalPages: meta.count, fraction: fraction };
       }
 
-      function flushProgress({ keepalive = false } = {}) {
+      function flushProgress({ keepalive = false, snapshot = null } = {}) {
         if (transientMode) {
           chapterElapsedMs = 0;
           return;
         }
-        const st = snapshotMultiChapterState();
+        const st = snapshot || snapshotMultiChapterState();
         if (!st) return;
         const elapsed = Math.round(chapterElapsedMs / 1000);
         chapterElapsedMs = 0;
@@ -1603,12 +1608,34 @@
         if (!st) return;
         syncChapterLabel(st.chapter);
         if (st.chapter !== lastObservedChapter) {
+          // Chapter boundary: flush everything accumulated so far
+          // against the OUTGOING chapter before the dominant chapter
+          // rolls over. Without this, finishing a chapter without a
+          // ≥500ms scroll pause on its last pages never reports them
+          // — near-end never fires, the chapter never counts, and its
+          // reading time lands on the next chapter. Scrolling DOWN
+          // out of a chapter means its end was read through, so the
+          // report pins to the last page; scrolling back UP just
+          // flushes at the position the user left.
+          if (prevChapterSnap && prevChapterSnap.chapter === lastObservedChapter) {
+            const metaFor = (name) => loadedChapters.find((c) => c.chapter === name);
+            const from = metaFor(lastObservedChapter);
+            const to = metaFor(st.chapter);
+            const goingDown = from && to && to.startIdx > from.startIdx;
+            clearTimeout(saveTimer);
+            flushProgress({
+              snapshot: goingDown
+                ? { ...prevChapterSnap, page: prevChapterSnap.totalPages, fraction: 1.0 }
+                : prevChapterSnap
+            });
+          }
           lastObservedChapter = st.chapter;
           SHELL.dataset.chapter = st.chapter;
           syncChapterNavLinks(st.chapter);
           const newUrl = SHELL.dataset.settingsBase + "/" + encodeURIComponent(st.chapter);
           try { history.replaceState({ chapter: st.chapter }, "", newUrl); } catch (_) {}
         }
+        prevChapterSnap = st;
       }
 
       // Fresco's viewport-change event fires when the dominant image
