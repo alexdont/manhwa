@@ -1748,22 +1748,32 @@
       // runs the appended-chapter memory window.
       container.addEventListener("scroll", () => {
         recordActivity();
-        // Auto-close the nav as soon as the user starts reading
-        // (= scrolling the strip). Cross-chapter clicks via in-nav
-        // links use window.location and reload the page; NAV_KEY
-        // stays "1" across that reload so the bar reappears on the
-        // destination chapter — supports the "rapid chapter-flip"
-        // flow without forcing the user to re-open the bar each time.
-        if (typeof window.__stripToggleNav === "function" &&
-            sessionStorage.getItem(NAV_KEY) === "1") {
-          window.__stripSetNav && window.__stripSetNav(false);
+        // During a snap motion the driver owns the frames — every
+        // scroll event here is our own scrollTop write, and this
+        // handler runs per frame. Skip everything that isn't needed
+        // mid-flight (URL/label sync, progress-save timer churn, the
+        // sessionStorage read, memory windowing); performSnapMotion
+        // runs one settle-time pass of all of it when the motion
+        // lands. Next-chapter prefetch stays live — snapping toward
+        // the end of the strip is exactly when it should fire.
+        if (!snapMotionActive) {
+          // Auto-close the nav as soon as the user starts reading
+          // (= scrolling the strip). Cross-chapter clicks via in-nav
+          // links use window.location and reload the page; NAV_KEY
+          // stays "1" across that reload so the bar reappears on the
+          // destination chapter — supports the "rapid chapter-flip"
+          // flow without forcing the user to re-open the bar each time.
+          if (typeof window.__stripToggleNav === "function" &&
+              sessionStorage.getItem(NAV_KEY) === "1") {
+            window.__stripSetNav && window.__stripSetNav(false);
+          }
+          // Movie-player cursor hide on scroll. CSS rule keys off
+          // `data-cursor-hidden`. Next mousemove unhides.
+          if (SHELL.dataset.cursorHidden !== "true") SHELL.dataset.cursorHidden = "true";
+          scheduleProgressSave();
+          maybeUpdateUrlForDominantChapter();
+          scheduleMemoryWindow();
         }
-        // Movie-player cursor hide on scroll. CSS rule keys off
-        // `data-cursor-hidden`. Next mousemove unhides.
-        SHELL.dataset.cursorHidden = "true";
-        scheduleProgressSave();
-        maybeUpdateUrlForDominantChapter();
-        scheduleMemoryWindow();
         if (!loadingNextChapter && pastTwoThirdsOfLastChapter()) {
           const last = loadedChapters[loadedChapters.length - 1];
           if (last.nextChapterApi) fetchAndAppendNextChapter();
@@ -2675,11 +2685,20 @@
         if (!el.isConnected || !el.offsetHeight) return null;
         return el.offsetTop + anchor.frac * el.offsetHeight - gutterDetectOffset();
       }
-      const SNAP_RETARGET_EPS  = 8;    // px of anchor drift before re-issuing scrollTo
-      const SNAP_CORRECT_EPS   = 4;    // px of landing error before final correction
-      const SNAP_SETTLE_FRAMES = 3;    // consecutive still frames near target = settled
-      const SNAP_STALL_FRAMES  = 12;   // still-but-off-target frames = browser stopped short
+      const SNAP_RETARGET_EPS  = 8;    // px of anchor drift counted as a retarget (debug stat)
+      const SNAP_CORRECT_EPS   = 4;    // px of landing error before instant-mode correction
+      const SNAP_VERIFY_FRAMES = 5;    // instant mode: frames of post-jump anchor verification
       const SNAP_TIMEOUT_MS    = 4000;
+      // Smooth-motion tuning. The driver is a slew-limited exponential
+      // approach: each frame moves a fixed fraction of the remaining
+      // distance (time-constant TAU), capped at a max velocity so long
+      // jumps glide instead of teleporting, floored at a min velocity
+      // so the ease-out tail never crawls. Position is continuous by
+      // construction — a moving target (layout reflow under lazy
+      // loading) just changes where the remaining distance points, so
+      // "retargeting" stops being an event at all.
+      const SNAP_TAU_MS        = 110;  // exponential time constant
+      const SNAP_MIN_V         = 160;  // px/s tail floor
       function performSnapMotion(initialTarget, behavior, withAnchor) {
         const anchor = withAnchor ? captureAnchor(initialTarget) : null;
         const stats = { retargets: 0, corrections: 0, interrupted: false, settleMs: 0, issuedTarget: Math.round(initialTarget) };
@@ -2691,61 +2710,88 @@
         ];
         intentTargets.forEach(([t, ev]) => t.addEventListener(ev, onIntent, { passive: true, capture: true }));
         snapMotionActive = true;
-        let issued = initialTarget;
-        function issue(top, b) {
-          // Clamp to the scrollable range so "issued" is a pixel the
-          // container can actually reach — otherwise the settle check
-          // never sees us "near target" at the strip's very bottom.
-          top = Math.max(0, Math.min(top, container.scrollHeight - container.clientHeight));
-          issued = top;
-          if (b === "auto") container.scrollTop = top;
-          else container.scrollTo({ top, behavior: "smooth" });
-        }
-        issue(initialTarget, behavior);
+        // Where the motion is heading RIGHT NOW: the anchor's current
+        // pixel (survives any reflow), clamped to the reachable range.
+        const targetPx = () => {
+          const px = anchorToPx(anchor);
+          const want = px != null ? px : initialTarget;
+          return Math.max(0, Math.min(want, container.scrollHeight - container.clientHeight));
+        };
         const t0 = performance.now();
-        let lastTop = container.scrollTop;
-        let stable = 0;
         return new Promise((resolve) => {
           function done() {
             stats.settleMs = Math.round(performance.now() - t0);
             stats.interrupted = interrupted;
             intentTargets.forEach(([t, ev]) => t.removeEventListener(ev, onIntent, { capture: true }));
             snapMotionActive = false;
+            // One settle-time pass of the per-scroll work the scroll
+            // handler skips while the motion owns the frames (URL/nav
+            // sync, progress save, memory window).
+            try { maybeUpdateUrlForDominantChapter(); } catch (_) {}
+            try { scheduleMemoryWindow(); } catch (_) {}
+            try { scheduleProgressSave(); } catch (_) {}
             resolve(stats);
           }
+
+          if (behavior === "auto") {
+            // Instant jump (user setting) — write, then verify the
+            // anchor for a few frames: a decode finishing right after
+            // the jump can shift layout, and the instant correction is
+            // what saves the multi-hundred-px misses.
+            container.scrollTop = targetPx();
+            let frames = 0;
+            (function verify() {
+              if (interrupted || performance.now() - t0 > SNAP_TIMEOUT_MS) return done();
+              const want = targetPx();
+              if (Math.abs(container.scrollTop - want) > SNAP_CORRECT_EPS && stats.corrections < 3) {
+                stats.corrections++;
+                if (snapDebugOn) console.log("[snap-trace] settle-correct -> " + Math.round(want));
+                container.scrollTop = want;
+              }
+              if (++frames >= SNAP_VERIFY_FRAMES) return done();
+              requestAnimationFrame(verify);
+            })();
+            return;
+          }
+
+          // Smooth: custom rAF driver (see SNAP_TAU_MS above). Owning
+          // the frames instead of scrollTo({behavior:"smooth"}) fixes
+          // the two feel-killers of the browser animation: a re-issued
+          // scrollTo restarts from zero velocity (every mid-flight
+          // retarget read as a stutter), and the final settle
+          // correction landed as a visible pop. The speed setting
+          // (turtle→rabbit) scales the glide velocity.
+          const mult = currentSpeedMultiplier() || 1;
+          const maxV = Math.max(2200, container.clientHeight * 4.5) * mult;
+          let pos = container.scrollTop;
+          let lastWrote = pos;
+          let lastT = t0;
           function frame() {
             if (interrupted) return done();
-            if (performance.now() - t0 > SNAP_TIMEOUT_MS) return done();
-            const cur = container.scrollTop;
-            const px = anchorToPx(anchor);
-            if (px != null && Math.abs(px - issued) > SNAP_RETARGET_EPS) {
-              // Layout shifted under the animation — chase the anchor.
+            const now = performance.now();
+            if (now - t0 > SNAP_TIMEOUT_MS) return done();
+            const dt = Math.min(50, Math.max(1, now - lastT));
+            lastT = now;
+            // Something else moved the scroll (browser clamp, chapter
+            // append reflow) — continue from where it actually is.
+            if (Math.abs(container.scrollTop - lastWrote) > 1) pos = container.scrollTop;
+            const want = targetPx();
+            if (Math.abs(want - stats.issuedTarget) > SNAP_RETARGET_EPS) {
               stats.retargets++;
-              if (snapDebugOn) console.log("[snap-trace] retarget " + Math.round(issued) + " -> " + Math.round(px));
-              issue(px, behavior);
-              stable = 0; lastTop = container.scrollTop;
-              return requestAnimationFrame(frame);
+              if (snapDebugOn) console.log("[snap-trace] target moved " + stats.issuedTarget + " -> " + Math.round(want));
+              stats.issuedTarget = Math.round(want);
             }
-            if (Math.abs(cur - lastTop) < 1) stable++;
-            else { stable = 0; lastTop = cur; }
-            const nearIssued = Math.abs(cur - issued) <= SNAP_CORRECT_EPS;
-            if (stable >= SNAP_SETTLE_FRAMES && (nearIssued || stable >= SNAP_STALL_FRAMES)) {
-              // Landed (or the browser gave up short). Verify against
-              // the anchor one last time — layout can shift after the
-              // animation stops too (a decode finishing right at the
-              // end). Small instant nudge, imperceptible at ≤ a few px
-              // of error but exactly what saves the multi-hundred-px
-              // misses.
-              const fpx = anchorToPx(anchor);
-              if (fpx != null && Math.abs(cur - fpx) > SNAP_CORRECT_EPS && stats.corrections < 3) {
-                stats.corrections++;
-                if (snapDebugOn) console.log("[snap-trace] settle-correct " + Math.round(cur) + " -> " + Math.round(fpx));
-                issue(fpx, "auto");
-                stable = 0; lastTop = container.scrollTop;
-                return requestAnimationFrame(frame);
-              }
+            const diff = want - pos;
+            if (Math.abs(diff) <= 0.5) {
+              container.scrollTop = want;
               return done();
             }
+            const eased = Math.abs(diff) * (1 - Math.exp(-dt / SNAP_TAU_MS));
+            const maxStep = maxV * dt / 1000;
+            const minStep = Math.min(Math.abs(diff), SNAP_MIN_V * dt / 1000);
+            pos += Math.sign(diff) * Math.min(maxStep, Math.max(minStep, eased));
+            container.scrollTop = pos;
+            lastWrote = container.scrollTop;
             requestAnimationFrame(frame);
           }
           requestAnimationFrame(frame);

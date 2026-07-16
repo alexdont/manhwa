@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.8 (2026-07-16)
+
+* Smart-snap motion rebuilt on a custom rAF driver (slew-limited
+  exponential approach toward the live anchor) instead of
+  `scrollTo({behavior: "smooth"})`. The browser animation restarted
+  from zero velocity on every mid-flight retarget (each one read as a
+  stutter under lazy-load layout shifts) and the final settle
+  correction landed as a visible pop; the driver follows a moving
+  target continuously, so both artifacts are gone. Identical feel on
+  desktop and mobile, immune to the browser cancelling its own smooth
+  scroll under main-thread load, and the reader speed setting now
+  scales the glide velocity. Instant jump style keeps the
+  write-then-verify behavior.
+* Scroll-frame diet during snap motions: the per-scroll handler work
+  (dominant-chapter scan, URL/nav-label sync, progress-save timer
+  churn, sessionStorage read, memory windowing) is skipped while the
+  driver owns the frames — one settle-time pass runs it all when the
+  motion lands. Next-chapter prefetch stays live mid-flight.
+
 ## 0.1.7 (2026-07-16)
 
 * Fix scroll/snap jank introduced by 0.1.6's boundary flush: image
