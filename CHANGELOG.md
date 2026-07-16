@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.7 (2026-07-16)
+
+* Fix scroll/snap jank introduced by 0.1.6's boundary flush: image
+  dominance can oscillate at a chapter boundary (the snap motion's
+  settle corrections nudge the viewport back and forth), and the
+  flush fired a synchronous fetch inside the scroll handler on every
+  flip — a burst of requests mid-animation. Boundary flushes are now
+  rate-limited to one per crossing window and the fetch is deferred
+  off the scroll frame.
+
 ## 0.1.6 (2026-07-15)
 
 * Reading-time fix: crossing a chapter boundary in the infinite

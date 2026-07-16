@@ -1317,6 +1317,7 @@
       // position inside the outgoing chapter (see the boundary flush
       // in maybeUpdateUrlForDominantChapter).
       let prevChapterSnap = null;
+      let lastBoundaryFlushMs = 0;
 
       function showLoadingDivider() {
         if (!loadingDivider) {
@@ -1617,17 +1618,28 @@
           // out of a chapter means its end was read through, so the
           // report pins to the last page; scrolling back UP just
           // flushes at the position the user left.
-          if (prevChapterSnap && prevChapterSnap.chapter === lastObservedChapter) {
+          // Rate-limited: dominance can OSCILLATE at a boundary (the
+          // snap motion's settle corrections nudge the viewport back
+          // and forth), and this runs inside the scroll handler — an
+          // unthrottled flush per flip means a burst of fetches
+          // mid-animation, i.e. jank exactly where snapping happens
+          // most. One flush per crossing window is plenty; the fetch
+          // itself is deferred off the scroll frame.
+          if (
+            prevChapterSnap &&
+            prevChapterSnap.chapter === lastObservedChapter &&
+            Date.now() - lastBoundaryFlushMs > 1500
+          ) {
+            lastBoundaryFlushMs = Date.now();
             const metaFor = (name) => loadedChapters.find((c) => c.chapter === name);
             const from = metaFor(lastObservedChapter);
             const to = metaFor(st.chapter);
             const goingDown = from && to && to.startIdx > from.startIdx;
+            const snap = goingDown
+              ? { ...prevChapterSnap, page: prevChapterSnap.totalPages, fraction: 1.0 }
+              : prevChapterSnap;
             clearTimeout(saveTimer);
-            flushProgress({
-              snapshot: goingDown
-                ? { ...prevChapterSnap, page: prevChapterSnap.totalPages, fraction: 1.0 }
-                : prevChapterSnap
-            });
+            setTimeout(() => flushProgress({ snapshot: snap }), 0);
           }
           lastObservedChapter = st.chapter;
           SHELL.dataset.chapter = st.chapter;
