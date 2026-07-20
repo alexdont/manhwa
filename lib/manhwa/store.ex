@@ -92,6 +92,11 @@ defmodule Manhwa.Store do
   Persist reading progress. Called on the reader's progress tick with
   `%{page: pos_integer, fraction: float, total_pages: pos_integer | nil,
   elapsed_seconds: non_neg_integer}`.
+
+  Optionally return `{:ok, %{chapter_read: boolean}}` to tell the reader
+  whether this chapter now counts as read by the host's own rules —
+  the reader shows a checkmark in the progress pill over the chapter's
+  final stretch once it's confirmed. Any other return is ignored.
   """
   @callback save_progress(user, series, chapter, progress :: map) :: :ok | {:ok, term} | {:error, term}
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.9 (2026-07-17)
+
+* Read checkmark in the progress pill: once the host confirms a
+  chapter counts as read, the bottom-center indicator shows a green ✓
+  over the chapter's last 5% — and latches for that chapter, so
+  scrolling back keeps showing it was read to completion. Opt-in for
+  hosts — `save_progress` may now return
+  `{:ok, %{chapter_read: boolean}}` and the progress endpoint echoes
+  it to the reader; stores that keep returning `:ok` see no change.
+  A `false` verdict also clears a stale mark (rereads restart their
+  time bar). Configurable: `config :manhwa, read_check_percent: 95`
+  (display gate, `0` = show on confirmation) and
+  `read_check_mark: "✓"` (any short string/emoji).
+* The pill's "% left" now measures from the BOTTOM of the viewport —
+  only content below the fold counts as left to read; what's on
+  screen is already seen. (It previously measured at the progress
+  anchor, so a full screen of visible content counted as unread.)
+  Progress saves and resume keep their existing anchor — only the
+  display changed. The read checkmark's display gate rides the same
+  measure, so it appears once less than 5% remains below the fold.
+
 ## 0.1.8 (2026-07-16)
 
 * Revert the experimental custom rAF snap-motion driver (briefly

@@ -453,7 +453,7 @@
        user scrolls. Matches production strip's progress pill. --%>
   <div id="strip-page-indicator"
        class="fixed bottom-4 left-1/2 -translate-x-1/2 z-10 px-3 py-1 rounded-full bg-base-300/70 text-xs font-bold text-base-content/70 pointer-events-none">
-    1 / {length(@images)}
+    <span id="strip-page-indicator-text">1 / {length(@images)}</span><span id="strip-read-check" class="text-success hidden" data-pct={Manhwa.Config.read_check_percent()}> {Manhwa.Config.read_check_mark()}</span>
   </div>
 
   <%!-- Auto-reader resume button — hidden by default; shows when the
@@ -1083,7 +1083,19 @@
       // Updates the bottom-center pill on every viewport-change event
       // (fresco's scroll_strip fires this when the dominant visible
       // image changes). Matches the production strip's progress pill.
-      const stripIndicator = document.getElementById("strip-page-indicator");
+      const stripIndicator = document.getElementById("strip-page-indicator-text");
+      const stripReadCheck = document.getElementById("strip-read-check");
+      // Display gate for the ✓ (host-configurable, default: last 5%;
+      // 0 = show as soon as the host confirms the chapter).
+      const readCheckPctRaw = stripReadCheck ? parseFloat(stripReadCheck.dataset.pct) : NaN;
+      const READ_CHECK_PCT = Number.isFinite(readCheckPctRaw) ? readCheckPctRaw : 95;
+      // Chapters the SERVER confirmed as counted-toward-read (via the
+      // progress-flush response). The ✓ first appears once the reader
+      // is inside the chapter's last 5% — then LATCHES for that
+      // chapter (chaptersCheckShown), so scrolling back up keeps
+      // showing the chapter was read to completion.
+      const chaptersReadServer = new Set();
+      const chaptersCheckShown = new Set();
       function updateStripIndicator() {
         if (!stripIndicator) return;
         // Prefer the multi-chapter snapshot so the indicator stays tied
@@ -1099,11 +1111,21 @@
           }
         } catch (_) { /* loadedChapters not initialized yet */ }
         if (st && st.totalPages > 0) {
-          const readPct = ((st.page - 1 + st.fraction) / st.totalPages) * 100;
+          // Seen = up to the viewport BOTTOM (fall back to the save
+          // anchor for snapshots that don't carry the seen fields).
+          const seenPage = st.seenPage || st.page;
+          const seenFraction = st.seenFraction != null ? st.seenFraction : st.fraction;
+          const readPct = ((seenPage - 1 + seenFraction) / st.totalPages) * 100;
           const leftPct = Math.max(0, Math.min(100, Math.round(100 - readPct)));
           stripIndicator.textContent = leftPct + "% left · Ch. " + st.chapter;
+          if (stripReadCheck) {
+            const key = String(st.chapter);
+            if (readPct >= READ_CHECK_PCT && chaptersReadServer.has(key)) chaptersCheckShown.add(key);
+            stripReadCheck.classList.toggle("hidden", !chaptersCheckShown.has(key));
+          }
         } else {
           stripIndicator.textContent = "—";
+          if (stripReadCheck) stripReadCheck.classList.add("hidden");
         }
       }
       handle.on("viewport-change", updateStripIndicator);
@@ -1527,7 +1549,33 @@
         const localPage = (best.idx - meta.startIdx) + 1;
         const center = (vpTop + vpBottom) / 2;
         const fraction = Math.max(0, Math.min(1, (center - best.top) / Math.max(1, best.h)));
-        return { chapter: meta.chapter, page: localPage, totalPages: meta.count, fraction: fraction };
+        // Bottom-of-viewport position within the same chapter —
+        // everything above this line is on screen or scrolled past,
+        // i.e. already SEEN. The "% left" pill measures from here
+        // (only content below the fold counts as left to read); the
+        // center-based page/fraction above stay the save/resume
+        // anchor so progress persistence is untouched.
+        let seenPage = localPage, seenFraction = fraction;
+        let bl = 0, bh = sorted.length - 1;
+        while (bl < bh) {
+          const mid = (bl + bh) >>> 1;
+          const e = sorted[mid];
+          if (vpBottom <= e.top + e.h) bh = mid; else bl = mid + 1;
+        }
+        const eb = sorted[bl];
+        if (eb.idx > meta.endIdx || vpBottom > eb.top + eb.h) {
+          // Bottom line is past this chapter's last image (next
+          // chapter peeking in, or the end of all content).
+          seenPage = meta.count;
+          seenFraction = 1;
+        } else if (eb.idx >= meta.startIdx) {
+          seenPage = (eb.idx - meta.startIdx) + 1;
+          seenFraction = Math.max(0, Math.min(1, (vpBottom - eb.top) / Math.max(1, eb.h)));
+        }
+        return {
+          chapter: meta.chapter, page: localPage, totalPages: meta.count, fraction: fraction,
+          seenPage: seenPage, seenFraction: seenFraction
+        };
       }
 
       function flushProgress({ keepalive = false, snapshot = null } = {}) {
@@ -1539,6 +1587,7 @@
         if (!st) return;
         const elapsed = Math.round(chapterElapsedMs / 1000);
         chapterElapsedMs = 0;
+        const flushedChapter = String(st.chapter);
         fetch(`${SHELL.dataset.settingsBase}/progress`, {
           method: "PUT",
           headers: {
@@ -1554,6 +1603,18 @@
             total_pages: st.totalPages
           }),
           keepalive
+        }).then((r) => (r.ok ? r.json() : null)).then((d) => {
+          // Server verdict on whether the flushed chapter counts as
+          // read — drives the pill's ✓. `false` also clears a stale
+          // mark (e.g. reread chapters restart their time bar).
+          if (!d || typeof d.chapter_read !== "boolean") return;
+          if (d.chapter_read) {
+            chaptersReadServer.add(flushedChapter);
+          } else {
+            chaptersReadServer.delete(flushedChapter);
+            chaptersCheckShown.delete(flushedChapter);
+          }
+          updateStripIndicator();
         }).catch(() => {});
       }
       function scheduleProgressSave() {

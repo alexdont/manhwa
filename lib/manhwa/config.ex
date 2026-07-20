@@ -81,4 +81,33 @@ defmodule Manhwa.Config do
   e.g. an OCR runtime script tag powering the smart auto-reader.
   """
   def extra_head, do: Application.get_env(:manhwa, :extra_head)
+
+  @doc """
+  How far into a chapter (percent, 0–100) the reader must be before
+  the host-confirmed read checkmark first appears in the progress
+  pill — it latches per chapter once shown. The mark itself only ever
+  shows for chapters the Store reported `chapter_read: true` for, so
+  this is purely a display gate. Default `95` (the last 5%).
+
+      config :manhwa, read_check_percent: 90
+  """
+  def read_check_percent do
+    case Application.get_env(:manhwa, :read_check_percent, 95) do
+      n when is_number(n) and n >= 0 and n <= 100 -> n
+      _ -> 95
+    end
+  end
+
+  @doc """
+  The mark rendered in the progress pill when a chapter is confirmed
+  read — any short string or emoji. Default `"✓"`.
+
+      config :manhwa, read_check_mark: "read"
+  """
+  def read_check_mark do
+    case Application.get_env(:manhwa, :read_check_mark, "✓") do
+      s when is_binary(s) and s != "" -> s
+      _ -> "✓"
+    end
+  end
 end

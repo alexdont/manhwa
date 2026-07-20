@@ -250,8 +250,13 @@ defmodule Manhwa.ReaderController do
         elapsed_seconds: parse_elapsed(params["elapsed"])
       }
 
-      Config.store().save_progress(user, series, chapter, progress)
-      json(conn, %{ok: true})
+      # A store may return `{:ok, %{chapter_read: boolean}}` to tell the
+      # reader whether this chapter now counts as read — surfaced as a
+      # checkmark in the progress pill. Plain `:ok` keeps the old shape.
+      case Config.store().save_progress(user, series, chapter, progress) do
+        {:ok, %{chapter_read: read}} -> json(conn, %{ok: true, chapter_read: read == true})
+        _ -> json(conn, %{ok: true})
+      end
     end)
   end
 
