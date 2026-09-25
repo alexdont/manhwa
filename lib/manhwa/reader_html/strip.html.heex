@@ -2419,26 +2419,44 @@
             d += scanStep;
           }
         } else {
-          if (startOnGutter) {
-            // Backward from gutter: find panel start just below (scan forward to exit gutter)
-            for (let d = 0; d < maxTravel; d += scanStep) {
-              if (!isWhiteAtScroll(startY + d)) return startY + d;
+          // Backward (2026-09-25 rework): ONE rule — the nearest panel
+          // start meaningfully above the probe; "meaningfully" is a
+          // quarter viewport. The old code had two branches whose seams
+          // caused the stuck loop: from a gutter it scanned FORWARD
+          // (turning back-taps into little downward "line up" hops —
+          // the +25px jumps all over the verdict logs), and from a
+          // panel its phase walk skipped the current panel's top. And
+          // since a settled position is never pixel-exact on touch
+          // hardware (tap jitter, settle tolerance), a tight epsilon
+          // would re-target the landing just above every second tap.
+          // Within NEAR of a panel start, that panel is what's on
+          // screen, so back means the panel BEFORE it. Deeper than
+          // NEAR into a panel, back-to-its-top is a real stop.
+          //
+          // Ascending scan, gutter-run debounced like everything else:
+          // a panel start is the row just below a ≥debounce white run.
+          const NEAR = Math.round(container.clientHeight * 0.25);
+          const landings = [];
+          let whiteRun = 0;
+          for (let d = scanStep; d <= maxTravel; d += scanStep) {
+            const y = startY - d;
+            if (y < 0) break;
+            if (isWhiteAtScroll(y)) {
+              whiteRun += scanStep;
+              if (whiteRun === debounce || (whiteRun > debounce && whiteRun - scanStep < debounce)) {
+                // White run just became a real gutter — the row below
+                // its bottom edge is a panel start (unless the run
+                // started AT the probe, i.e. we began inside it).
+                const panelTop = y + whiteRun;
+                if (panelTop < startY) landings.push(panelTop);
+              }
+            } else {
+              whiteRun = 0;
             }
-          } else {
-            // Backward from panel: go up to previous panel's top
-            // panel -> gutter(ride through) -> prev panel -> gutter -> stop at prev panel top
-            let phase = 1;
-            let lastPanelY = startY;
-            const state = { lastNonWhite: startY };
-            for (let d = 0; d < maxTravel; d += scanStep) {
-              const y = startY - d;
-              const onGutter = scanIsGutter(y, state);
-              if (phase === 1 && onGutter)  phase = 2;
-              if (phase === 2 && !onGutter) { phase = 3; lastPanelY = y; }
-              if (phase === 3 && !onGutter) lastPanelY = y;
-              if (phase === 3 && onGutter)  return lastPanelY;
-            }
+            if (landings.length >= 2) break;
           }
+          if (landings.length >= 1 && startY - landings[0] > NEAR) return landings[0];
+          if (landings.length >= 2) return landings[1];
         }
         return startY + direction * maxTravel;
       }
@@ -2650,17 +2668,17 @@
           };
         }
 
-        // Backward (and long_panel_steps off): distance-based rule,
-        // unchanged — backward reading revisits content the user has
-        // already seen, so fold-precision matters less than momentum.
+        // Backward: NEVER half-step (2026-09-25). A back-jump's
+        // distance spans panel + gutter, so in gutter-heavy manhwa
+        // nearly every back-tap measured as "long" and half-stepped
+        // into the spacing above the current panel instead of reaching
+        // the previous panel's start — the other half of the stuck-
+        // between-positions loop. Reading backward means landing on
+        // panel starts, full stop. (long_panel_steps-off forward also
+        // lands here and stays a straight snap, as before.)
         const panelEnd = await findPanelEnd(target, direction);
         const panelLen = Math.abs(panelEnd - target);
-        const isLongPan = snapConfig.long_panel_steps && absDist >= vh * 1.1;
-        let scrollTarget = target;
-        if (isLongPan && absDist > stepSize) {
-          scrollTarget = start + direction * stepSize;
-        }
-        return { scrollTarget, panelEnd, panelLen, isLongPan, curLong: isLongPan, nextLong: false };
+        return { scrollTarget: target, panelEnd, panelLen, isLongPan: false, curLong: false, nextLong: false };
       }
 
       // ── Snap action (verbatim port of production's smartScroll,
@@ -2899,6 +2917,20 @@
               " behavior=" + behavior);
           }
           const settle = await performSnapMotion(scrollTarget, behavior, true);
+          // Always-on movement log: every snap posts its decision so a
+          // misbehaving session replays server-side, no toggles needed.
+          try {
+            const pos = scrollPxToImagePos(container.scrollTop + gutterDetectOffset());
+            postDebug({
+              event: "snap_move", build: STRIP_BUILD,
+              chapter: SHELL.dataset.chapter, direction: direction,
+              scrollBefore: Math.round(start), findTarget: Math.round(target),
+              scrollTarget: Math.round(scrollTarget),
+              scrollAfter: Math.round(container.scrollTop),
+              probeImg: pos.imageIdx, probeSrcY: Math.round(pos.srcY),
+              settle: settle, vh: container.clientHeight, ts: Date.now()
+            });
+          } catch (_) {}
           if (debugCtx) debugCtx.settle = settle;
           if (snapDebugOn) {
             console.log("[snap-trace] settled scrollTop=" + Math.round(container.scrollTop) +
@@ -3010,6 +3042,23 @@
         if (verdictBar) verdictBar.classList.add("hidden");
         pendingVerdict = null;
       }
+      // Fire-and-forget debug POST — verdict bar + always-on move log.
+      const STRIP_BUILD = "manhwa-bf1-2026-09-25";
+      console.log("[strip] snap build " + STRIP_BUILD);
+      function postDebug(payload) {
+        fetch(SHELL.dataset.debugLogUrl, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-csrf-token": SHELL.dataset.csrfToken
+          },
+          body: JSON.stringify(payload),
+          credentials: "same-origin"
+        }).catch(() => {});
+      }
+      // Boot beacon: which build is this device actually running?
+      postDebug({ event: "strip_boot", build: STRIP_BUILD, ua: navigator.userAgent, ts: Date.now() });
+
       function postVerdict(verdict) {
         if (!pendingVerdict) return;
         const elapsedMs = Math.round(performance.now() - pendingVerdict.startedAt);

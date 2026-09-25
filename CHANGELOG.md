@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.10 (2026-09-25)
+
+* Backward snapping reworked to one rule: the nearest panel start
+  meaningfully above the probe, where "meaningfully" is a quarter
+  viewport. Within that range of a panel start the reader is
+  considered AT it (touch tap-jitter and settle tolerance mean a
+  settled position is never pixel-exact), so a back-tap goes to the
+  panel BEFORE it. The old two-branch code got stuck oscillating
+  between a panel start and the gutter above it: from a gutter it
+  scanned FORWARD ("align the panel below"), turning back-taps into
+  little downward hops, and its phase walk always skipped the
+  current panel's top.
+* Backward snaps never half-step. A back-jump's distance spans
+  panel + gutter, so on gutter-heavy strips nearly every back-tap
+  measured as "long panel" and stranded the reader mid-spacing.
+  Reading backward lands on panel starts, full stop.
+* Debug: the strip logs a `strip_boot` beacon (build stamp + UA) on
+  every load and a `snap_move` record per snap (position before,
+  computed target, settled position, probe image/row, settle stats)
+  to the host's `debug_log_url` — fire-and-forget, a few hundred
+  bytes per tap. Diagnosing "the reader misbehaves on my phone"
+  no longer requires the user to toggle anything. Build stamp:
+  `manhwa-bf1-2026-09-25` (also printed to the console on boot).
+
+
 ## 0.1.9 (2026-07-17)
 
 * Read checkmark in the progress pill: once the host confirms a
